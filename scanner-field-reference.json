@@ -1,0 +1,67 @@
+{
+  "description": "Scanner log-lake field reference for LLM-driven query generation. Given a behavior, the model selects the source, picks fields from that source, and emits a Scanner query using the syntax rules. All field names and sample values are taken from observed data.",
+  "index": "ocsf_mapped",
+  "source_selector_field": "metadata.product.name",
+  "syntax_rules": {
+    "index_filter": "Begin queries with @index=ocsf_mapped",
+    "product_filter": "metadata.product.name:'Office 365' | metadata.product.name:Fortigate | metadata.product.name:'F5 Distributed Cloud WAF' (quote values containing spaces)",
+    "token_match": "field:value matches a whole token (case-insensitive). Boundaries are any non [a-zA-Z0-9_] char.",
+    "exact_match": "field=\"value\" for exact whole-field match (REQUIRED for metadata.event_code).",
+    "numeric": "field:N or field>N / field<N for numeric fields (ports, counts).",
+    "user_agent_match": "Use suffix wildcard: http_request.user_agent:Go-http-client* . Quoted phrases with hyphens/slashes do NOT match.",
+    "wildcards": "value* = suffix (fast); *value = prefix (slow); **:value = search all fields.",
+    "boolean": "Combine with and / or / not inside parentheses, e.g. (a:x or a:y)",
+    "aggregation": "Append | groupbycount(field, ...) (auto-sorted, top 1000) or | count(). Do NOT use table() or | head N (they return 0 rows in this lake).",
+    "null_grouping": "groupbycount drops rows where any grouped field is null; group on fields known to be populated for the matched source.",
+    "labels_caveat": "metadata.labels[1] lives only on raw/main docs, not ocsf_mapped. Filter by metadata.product.name instead.",
+    "time": "Data is in event-time and lags wall-clock (~1.5 days). Query windows must cover where data actually lands."
+  },
+  "sources": {
+    "fortigate": {
+      "product_name": "Fortigate",
+      "notes": "Source IP and geo usually unmapped. Pivot on dst_endpoint, app_name, and unmapped.FTNTFGT* fields.",
+      "fields": {
+        "dst_endpoint.ip": {"type": "ip", "desc": "Destination/target IP", "samples": ["203.192.232.58", "203.76.182.246", "8.8.8.8"]},
+        "dst_endpoint.port": {"type": "int", "desc": "Destination port", "samples": [443, 80, 53, 23, 22, 3389, 500]},
+        "app_name": {"type": "keyword", "desc": "Detected application/service", "samples": ["HTTPS", "DNS", "TELNET", "TRACEROUTE", "PING", "DHCP"]},
+        "connection_info.protocol_name": {"type": "keyword", "desc": "L4 protocol", "samples": ["tcp", "udp", "icmp"]},
+        "status": {"type": "keyword", "desc": "Action outcome", "samples": ["Success", "Failure", "Other", "Unknown"]},
+        "unmapped.FTNTFGTsubtype": {"type": "keyword", "desc": "FortiGate log subtype", "samples": ["forward", "local", "webfilter", "vpn", "ssl", "system", "sdwan"]},
+        "unmapped.FTNTFGTeventtype": {"type": "keyword", "desc": "FortiGate event type", "samples": ["ftgd_allow", "ftgd_blk", "ssl-anomaly"]},
+        "unmapped.FTNTFGTcat": {"type": "keyword", "desc": "Web filter category"},
+        "unmapped.FTNTFGTpolicyid": {"type": "int", "desc": "Firewall policy ID"},
+        "http_request.url.url_string": {"type": "url", "desc": "Requested URL (web filter)"},
+        "traffic.bytes": {"type": "int", "desc": "Bytes transferred"}
+      }
+    },
+    "office365": {
+      "product_name": "Office 365",
+      "notes": "Unified Audit Log. activity_name is the normalized operation. Account/automation behavior lives here.",
+      "fields": {
+        "activity_name": {"type": "keyword", "desc": "Operation", "samples": ["Logon", "Logoff", "Receive", "Send", "Read", "Download", "Upload", "Share", "Add User", "Password Change", "Password Reset", "Create", "Update", "Delete"]},
+        "status": {"type": "keyword", "desc": "Operation outcome", "samples": ["Success", "Failure", "Other"]},
+        "actor.user.name": {"type": "keyword", "desc": "User UPN", "samples": ["shivani.v@aquilai.io", "app@sharepoint"]},
+        "src_endpoint.ip": {"type": "ip", "desc": "Client/source IP of the activity", "samples": ["35.154.127.29", "203.192.232.58", "20.190.175.88"]},
+        "http_request.user_agent": {"type": "string", "desc": "Client user agent", "samples": ["Go-http-client/1.1", "Microsoft SkyDriveSync ...", "Mozilla/5.0 ... Edg/149.0.0.0"]},
+        "app_name": {"type": "keyword", "desc": "Workload/app"}
+      }
+    },
+    "f5_waf": {
+      "product_name": "F5 Distributed Cloud WAF",
+      "notes": "Web app firewall. Verdict + method + status are packed into metadata.event_code. Client IP is NOT in src_endpoint.ip.",
+      "fields": {
+        "metadata.event_code": {"type": "keyword_exact", "desc": "METHOD-action-status. MATCH WITH = (exact).", "samples": ["GET-allow-200", "GET-block-403", "GET-deny-403", "POST-block-403", "GET-block-200", "POST-allow-200"]},
+        "class_name": {"type": "keyword", "desc": "Event class", "samples": ["HTTP Activity"]},
+        "unmapped.original_path": {"type": "path", "desc": "Requested URI path", "samples": ["/", "/404", "/meta.json", "/ScriptResource.axd", "/WebResource.axd", "/Brands.aspx/GetFilteredBrands"]},
+        "http_request.user_agent": {"type": "string", "desc": "Client user agent", "samples": ["RecScan/1.0", "Scrapy/2.16.0", "Bytespider", "Sogou web spider/4.0", "GPTBot/1.4"]}
+      }
+    }
+  },
+  "cross_source_pivots": [
+    {"name": "infrastructure_reuse", "fieldA": {"source": "office365", "field": "src_endpoint.ip"}, "fieldB": {"source": "fortigate", "field": "dst_endpoint.ip"}, "logic": "same IP value in both sources"}
+  ],
+  "exclusions": {
+    "ip": ["192.46.214.96 (corporate NAT egress)", "20.190.175.0/24 (Microsoft identity provider)"],
+    "user_agent_prefixes": ["Microsoft SkyDriveSync", "facebookexternalhit", "AdsBot-Google"]
+  }
+}
